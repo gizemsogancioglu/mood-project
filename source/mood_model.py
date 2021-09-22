@@ -1,44 +1,35 @@
-from sklearn.svm import SVC
-from sklearn.metrics import recall_score
-from sklearn.model_selection import GridSearchCV, PredefinedSplit
-from sklearn.metrics import recall_score
-from collections import Counter
+import collections
 from sklearn.feature_selection import SelectFromModel
-from sklearn.svm import LinearSVC
-from sklearn.feature_selection import SelectKBest
-from sklearn.feature_selection import chi2
-from sklearn.ensemble import ExtraTreesClassifier
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import recall_score
 import pandas as pd
 import numpy as np
-import sklearn.metrics
 import sys
-from sklearn.decomposition import PCA
+from sklearn.model_selection import GridSearchCV
+from sklearn.multioutput import MultiOutputClassifier
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.svm import LinearSVC, SVC
 np.set_printoptions(threshold=sys.maxsize)
-import seaborn as sns
-from sklearn.preprocessing import MinMaxScaler
+
+svm_params = [{
+        'C': [0.01, 0.1, 1, 10],
+        'kernel': ['linear', 'sigmoid', 'rbf'],
+        'class_weight': ["balanced"],
+        'probability': [True]
+    }]
 
 def evaluate(y, y_pred):
     # Evaluation
     return (recall_score(y, y_pred, average='macro')* 100)
 
-ROOT_PATH = "/content/drive/My Drive/phd/mood-project/"
-
 mood_begin = 660
 mood_end = 960
+class_dimensions = ['valence', 'arousal', 'likeability']
 
+def update_y():
+    annots_ = pd.read_csv('../data/mood_annots.csv')
+    y_train = annots_.iloc[:mood_begin]
+    y_blind = annots_.iloc[mood_begin:mood_end]
 
-def update_y(class_type, label):
-    annots_ = pd.read_csv(ROOT_PATH + 'mood_annots/anno_gt_' + class_type + '.csv')[['Filename', label]]
-    from sklearn import preprocessing
-    le = preprocessing.LabelEncoder()
-    y_train = annots_.iloc[:mood_begin][label]
-    le.fit(y_train)
-    y_train = le.transform(y_train)
-    y_blind = annots_.iloc[mood_begin:mood_end][label]
-    y_blind = le.transform(y_blind)
-    annots_ = annots_.rename(columns={"Filename": "id"})
     return (annots_, pd.DataFrame(y_train), pd.DataFrame(y_blind))
 
 
@@ -52,31 +43,52 @@ def get_mood_subset_for_training(data):
             columns=['id']).reset_index(drop=True)
     return ordered_data
 
+def tune(X_train, y_train):
+    grid = GridSearchCV(
+       SVC(), svm_params, scoring='%s_macro' % "recall", verbose=1, cv=3)
+    grid.fit(X_train, y_train)
+    return grid
 
-def experiment(features):
-    # feature-level fusion for at most 5 different features
-    y = np.ravel(y_train)
-    print("Length of training data {t} and test data {tt}".format(t=features[0].shape, tt=features[1].shape))
-    clf = tune(features[0].values, y)
-    y_preds = clf.predict(features[1].values)
-    dev_UAR = clf.best_score_
-    # print("EVALUATION SCORE UAR%:({}) ".format(evaluate(y_blind, y_preds)))
-    return (evaluate(y_blind, y_preds), dev_UAR, clf)
+def experiment(mood_feat):
+    multimodal_ff = early_fusion(mood_feat)
+    for mood in ['valence', 'arousal', 'likeability']:
+        grid = tune(multimodal_ff[mood][0], np.ravel(y_train[mood]))
+        print("CV score of model {model}: {mood} ".format(model=mood, mood=grid.best_score_))
+        test_preds = grid.predict(multimodal_ff[mood][1].values)
+        test_score = evaluate(y_blind[mood], test_preds)
+        print("Test set score of {model} model is : {score}".format(model=mood, score=test_score))
+    return
 
-def read_aco_features():
+def early_fusion(mood_feat):
+    # Valence model : [Polarity, TEPS, VGG-FER]
+    # Arousal model: [VAD, IS13, VGG-FER]
+    # Likeability model : [TEPS, VAD, IS13, VGG-FER]
+
+    for class_ in class_dimensions:
+        (mood_feat['video_' + class_], l1_model) = l1_feature_selection(transform_before_fusion(mood_feat['video'], 'sc'), y_train[class_])
+        (mood_feat['audio_' + class_], l1_model) = l1_feature_selection(transform_before_fusion(mood_feat['audio'], 'minmax'), y_train[class_])
+
+    multimodal_ff = collections.defaultdict(list)
+    for i in [0, 1]:
+        multimodal_ff['valence'].append(pd.concat([mood_feat['video_valence'][i], mood_feat['summary'][i], mood_feat['stats'][i]], axis=1))
+        multimodal_ff['arousal'].append(
+            pd.concat([ mood_feat['vad'][i], mood_feat['video_arousal'][i], mood_feat['audio_arousal'][i]], axis=1))
+        multimodal_ff['likeability'].append(
+            pd.concat([mood_feat['vad'][i], mood_feat['stats'][i], mood_feat['video_likeability'][i], mood_feat['audio_likeability'][i]], axis=1))
+
+    return multimodal_ff
+
+def read_sensor_features():
     ###. Read Audio/Video PCA features
-    ### TRAIT ARR ###
-    trait_arr = ["openness", "agreeableness", "conscientiousness", "extraversion", "neuroticism", "interview"]
     p_traits_annots = []
     for split in ["training", "validation", "test"]:
-        print("split : ", split)
         p_traits_annots.append(
-            pd.DataFrame.from_dict(pd.read_pickle(ROOT_PATH + "p-traits/data/annotation_" + split + ".pkl")))
+            pd.DataFrame.from_dict(pd.read_pickle("../data/p-traits/annotation_" + split + ".pkl")))
         p_traits_annots[-1]['id'] = p_traits_annots[-1].index
         p_traits_annots[-1] = p_traits_annots[-1].reset_index(drop=True)
 
-    audio = pd.read_csv(ROOT_PATH + "audio_pca.csv", index_col=0)
-    video = pd.read_csv(ROOT_PATH + "video_pca.csv", index_col=0)
+    audio = pd.read_csv("../features/audio_pca.csv", index_col=0)
+    video = pd.read_csv("../features/video_pca.csv", index_col=0)
 
     audio_pca = [audio[0:6000].reset_index(drop=True), audio[6000:8000].reset_index(drop=True),
                  audio[8000: 10000].reset_index(drop=True)]
@@ -87,68 +99,51 @@ def read_aco_features():
         audio_pca[i] = pd.concat([p_traits_annots[i]['id'], audio_pca[i]], axis=1)
         video_pca[i] = pd.concat([p_traits_annots[i]['id'], video_pca[i]], axis=1)
 
+    return (audio_pca, video_pca)
 
 def read_ling_features():
-    summary = []
-    stats = []
-    LIWC = []
-    bert = []
-    tfidf = []
-    fasttext = []
-    polarity = []
-    lda = []
-    rep = []
-    valence = []
-    arousal = []
-    like = []
-    i = 0
-    for split in ["training", "validation", "test"]:
-        tfidf.append(pd.read_csv('features/tfidf_' + split + '.csv'))
-        fasttext.append(pd.read_csv(ROOT_PATH + 'features/fasttext_' + split + '.csv'))
-        polarity.append(pd.read_csv(ROOT_PATH + 'features/polarity_' + split + '.csv'))
-        # not in the same order with the transcriptions.
-        summary.append(pd.read_csv(ROOT_PATH + 'features/summary_' + split + '.csv').fillna(0))
-        # all in the same order with the transcripts data set..
-        stats.append(pd.read_csv(ROOT_PATH + 'features/stats_' + split + '.csv'))
-        LIWC.append(pd.read_csv(ROOT_PATH + 'features/LIWC_' + split + '.csv'))
-        bert.append(pd.read_csv(ROOT_PATH + 'features/bert_' + split + '.csv'))
-        lda.append(pd.read_csv(ROOT_PATH + "p-traits/lda_results_" + split + '.csv', index_col=0))
-        rep.append(pd.read_csv(ROOT_PATH + "features/rep_" + split + ".csv", index_col=0))
-        i += 1
+    ling_feat = collections.defaultdict(list)
+    for ling in ['tfidf', 'summary', 'stats', 'LIWC', 'bert', 'vad']:
+        for split in ["training", "validation", "test"]:
+            ling_feat[ling].append(pd.read_csv('../features/' + ling + '_' + split + '.csv'))
+            if ling == "summary":
+                ling_feat['summary'][-1] = ling_feat['summary'][-1].fillna(0)
 
-    VAD = pd.read_csv((ROOT_PATH + "NRC-VAD-features.csv"), index_col=0)
-    vad = [VAD[0:6000], VAD[6000:8000], VAD[8000:10000]]
+    return ling_feat
 
-    VAD2 = pd.read_csv((ROOT_PATH + "NRC-VAD-features2.csv"), index_col=0)
-    vad2 = [VAD2[0:6000], VAD2[6000:8000], VAD2[8000:10000]]
+def transform_before_fusion(data, scaler):
+  transformed_data = []
+  if scaler == "minmax":
+    scaler = MinMaxScaler()
+  else:
+    scaler = StandardScaler()
+  transformed_data.append(pd.DataFrame(scaler.fit_transform(data[0])))
+  for i in range(len(data)-1):
+    transformed_data.append(pd.DataFrame(scaler.transform(data[i+1])))
+  return transformed_data
 
-    for i in [0, 1, 2]:
-        for col in lda[i].columns:
-            lda[i][col] = lda[i][col].apply(lambda x: float(x.replace(")", "").split(",")[1].strip()))
-        lda[i] = pd.concat([LIWC[i]['id'], lda[i]], axis=1)
+def l1_feature_selection(data, y):
+    transformed_data = []
 
+    clf = LinearSVC(C=0.1, penalty="l1", dual=False, class_weight="balanced").fit(data[0], y)
+    l1_model = SelectFromModel(clf, prefit=True)
+    for i in range(len(data)):
+        transformed_data.append(pd.DataFrame(l1_model.transform(data[i])))
+    return (transformed_data, l1_model)
 
 if __name__ == "__main__":
-    label = "GT_base"
-    class_type = "valence"
-    (mood_annots_, y_train, y_blind) = update_y(class_type, label)
+    trait_arr = ["openness", "agreeableness", "conscientiousness", "extraversion", "neuroticism", "interview"]
+    mood_feat = {}
 
-    annots_all = pd.read_csv(ROOT_PATH + "mood_annots/mood_annots.csv", index_col=0)
-    from itertools import combinations
+    (mood_annots_, y_train, y_blind) = update_y()
+    y = [y_train, y_blind]
 
-    # audio = get_mood_subset_for_training(audio[0])
-    audio_pca_ordered = get_mood_subset_for_training(audio_pca[0])
+    (audio_pca, video_pca) = read_sensor_features()
+    ling_feat = read_ling_features()
 
-    # video = get_mood_subset_for_training(video[0])
-    video_pca_ordered = get_mood_subset_for_training(video_pca[0])
-    from itertools import combinations
+    for ling in ling_feat.keys():
+        mood_feat[ling] = get_mood_subset_for_training(ling_feat[ling][0])
+    mood_feat['audio'] = get_mood_subset_for_training(audio_pca[0])
+    mood_feat['video'] = get_mood_subset_for_training(video_pca[0])
 
-    summary_ordered = get_mood_subset_for_training(summary[0])
-    LIWC_ordered = get_mood_subset_for_training(LIWC[0])
-    bert_ordered = get_mood_subset_for_training(bert[0])
-    stats_ordered = get_mood_subset_for_training(stats[0])
-    rep_ordered = get_mood_subset_for_training(rep[0])
-    vad_ordered = get_mood_subset_for_training(vad[0])
-    tfidf_ordered = get_mood_subset_for_training(tfidf[0])
-
-    # scene_pca = get_mood_subset_for_training(scene_pca[0])
+    experiment(mood_feat)
