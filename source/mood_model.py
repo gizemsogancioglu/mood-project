@@ -1,18 +1,18 @@
 import collections
+from sklearn import preprocessing
 from sklearn.feature_selection import SelectFromModel
 from sklearn.metrics import recall_score
 import pandas as pd
 import numpy as np
 import sys
 from sklearn.model_selection import GridSearchCV
-from sklearn.multioutput import MultiOutputClassifier
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.svm import LinearSVC, SVC
 np.set_printoptions(threshold=sys.maxsize)
-
+import os
 svm_params = [{
         'C': [0.01, 0.1, 1, 10],
-        'kernel': ['linear', 'sigmoid', 'rbf'],
+        'kernel': ['sigmoid', 'rbf'],
         'class_weight': ["balanced"],
         'probability': [True]
     }]
@@ -25,10 +25,15 @@ mood_begin = 660
 mood_end = 960
 class_dimensions = ['valence', 'arousal', 'likeability']
 
-def update_y():
+def read_annots():
     annots_ = pd.read_csv('../data/mood_annots.csv')
     y_train = annots_.iloc[:mood_begin]
     y_blind = annots_.iloc[mood_begin:mood_end]
+    le = preprocessing.LabelEncoder()
+
+    for class_ in class_dimensions:
+        y_train[class_] = le.fit_transform((y_train[class_]))
+        y_blind[class_] = le.transform((y_blind[class_]))
 
     return (annots_, pd.DataFrame(y_train), pd.DataFrame(y_blind))
 
@@ -51,11 +56,12 @@ def tune(X_train, y_train):
 
 def experiment(mood_feat):
     multimodal_ff = early_fusion(mood_feat)
-    for mood in ['valence', 'arousal', 'likeability']:
+    for mood in ['arousal']:
         grid = tune(multimodal_ff[mood][0], np.ravel(y_train[mood]))
         print("CV score of model {model}: {mood} ".format(model=mood, mood=grid.best_score_))
-        test_preds = grid.predict(multimodal_ff[mood][1].values)
-        test_score = evaluate(y_blind[mood], test_preds)
+        test_preds = grid.predict(multimodal_ff[mood][1])
+        test_score = evaluate(np.ravel(y_blind[mood]), test_preds)
+        #print(test_preds)
         print("Test set score of {model} model is : {score}".format(model=mood, score=test_score))
     return
 
@@ -63,16 +69,16 @@ def early_fusion(mood_feat):
     # Valence model : [Polarity, TEPS, VGG-FER]
     # Arousal model: [VAD, IS13, VGG-FER]
     # Likeability model : [TEPS, VAD, IS13, VGG-FER]
-
+    l1_model = collections.defaultdict(list)
     for class_ in class_dimensions:
-        (mood_feat['video_' + class_], l1_model) = l1_feature_selection(transform_before_fusion(mood_feat['video'], 'sc'), y_train[class_])
-        (mood_feat['audio_' + class_], l1_model) = l1_feature_selection(transform_before_fusion(mood_feat['audio'], 'minmax'), y_train[class_])
+        (mood_feat['video_' + class_], l1_model['video_' + class_]) = l1_feature_selection(transform_before_fusion(mood_feat['video'], 'sc'), y_train[class_])
+        (mood_feat['audio_' + class_], l1_model['video_' + class_]) = l1_feature_selection(transform_before_fusion(mood_feat['audio'], 'minmax'), y_train[class_])
 
     multimodal_ff = collections.defaultdict(list)
     for i in [0, 1]:
         multimodal_ff['valence'].append(pd.concat([mood_feat['video_valence'][i], mood_feat['summary'][i], mood_feat['stats'][i]], axis=1))
         multimodal_ff['arousal'].append(
-            pd.concat([ mood_feat['vad'][i], mood_feat['video_arousal'][i], mood_feat['audio_arousal'][i]], axis=1))
+            pd.concat([mood_feat['vad'][i], mood_feat['video_arousal'][i], mood_feat['audio_arousal'][i]], axis=1))
         multimodal_ff['likeability'].append(
             pd.concat([mood_feat['vad'][i], mood_feat['stats'][i], mood_feat['video_likeability'][i], mood_feat['audio_likeability'][i]], axis=1))
 
@@ -124,7 +130,6 @@ def transform_before_fusion(data, scaler):
 
 def l1_feature_selection(data, y):
     transformed_data = []
-
     clf = LinearSVC(C=0.1, penalty="l1", dual=False, class_weight="balanced").fit(data[0], y)
     l1_model = SelectFromModel(clf, prefit=True)
     for i in range(len(data)):
@@ -134,16 +139,18 @@ def l1_feature_selection(data, y):
 if __name__ == "__main__":
     trait_arr = ["openness", "agreeableness", "conscientiousness", "extraversion", "neuroticism", "interview"]
     mood_feat = {}
-
-    (mood_annots_, y_train, y_blind) = update_y()
+    (mood_annots_, y_train, y_blind) = read_annots()
     y = [y_train, y_blind]
 
-    (audio_pca, video_pca) = read_sensor_features()
-    ling_feat = read_ling_features()
+    if os.path.isfile('../predictions/valence_preds_training.csv'):
+        print("Mood+likeability predictions are already in the following folder : (predictions/valence_predictions.csv). Skipping training of first-level mood classifier.. ")
+    else:
+        (audio_pca, video_pca) = read_sensor_features()
+        ling_feat = read_ling_features()
 
-    for ling in ling_feat.keys():
-        mood_feat[ling] = get_mood_subset_for_training(ling_feat[ling][0])
-    mood_feat['audio'] = get_mood_subset_for_training(audio_pca[0])
-    mood_feat['video'] = get_mood_subset_for_training(video_pca[0])
+        for ling in ling_feat.keys():
+            mood_feat[ling] = get_mood_subset_for_training(ling_feat[ling][0])
+        mood_feat['audio'] = get_mood_subset_for_training(audio_pca[0])
+        mood_feat['video'] = get_mood_subset_for_training(video_pca[0])
 
-    experiment(mood_feat)
+        experiment(mood_feat)
