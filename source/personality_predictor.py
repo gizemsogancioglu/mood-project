@@ -1,6 +1,4 @@
 import collections
-
-import numpy as np
 from sklearn.metrics import mean_absolute_error
 from interpret.glassbox import ExplainableBoostingRegressor, LinearRegression
 import pandas as pd
@@ -12,7 +10,7 @@ def evaluate(y, y_pred):
 def ebm_regression(features):
     mean = 0
     x = pd.concat([features[0], features[1]]).reset_index(drop=True)
-    feat_importances = []
+    feat_importances = None
     for trait in trait_arr:
         y_train = pd.concat([y[0], y[1]]).reset_index(drop=True)
         ebm = ExplainableBoostingRegressor(validation_size=0.25, random_state=1, n_jobs=-1)
@@ -21,15 +19,13 @@ def ebm_regression(features):
         print(evaluate(y[2][trait], y_preds))
         mean += evaluate(y[2][trait], y_preds)
         print("Feature importances for trait {trait}".format(trait=ebm.feature_importances_))
-        feat_importances = np.concatenate([np.array(feat_importances), np.array(ebm.feature_importances_)])
-    print(feat_importances)
-    df = pd.DataFrame(feat_importances, columns=['low_valence', 'medium_valence',
-                                                                       'high_valence', 'low_arousal',
-                                                                       'medium_arousal', 'high_arousal',
-                                                                       'low_likeability', 'medium_likeability',
-                                                                       'high_likeability'])
-    df.index = trait_arr
-    df.to_csv("../predictions/model_feat_importances.csv", index=False)
+        if feat_importances is not None:
+            feat_importances = pd.concat([(feat_importances), pd.Series(ebm.feature_importances_)], axis=1)
+        else:
+            feat_importances = pd.Series(ebm.feature_importances_)
+    feat_importances.columns = trait_arr
+    feat_importances.index = ebm.feature_names
+    feat_importances.to_csv("../predictions/model_feat_importances.csv")
     print("MEAN SCORE of Big-5 predictions in the test set is : {score}".format(score= mean/5))
     print("Explanations (feature importances of model) are saved in the : predictions/model_feat_importances.csv")
     return ebm
