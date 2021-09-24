@@ -29,7 +29,7 @@ Available in this repository:
     * Personality trait regressor
 
 ## How to run?
-<strong> Run the following command to start docker container. Predictions will be saved in /tmp folder. </strong> 
+<strong> Run the following command to start docker container. The performance and the feature importances of the trained model will be outputted in the terminal. </strong> 
 
 ```bash
 docker run gizemsogancioglu/mood_img:latest 
